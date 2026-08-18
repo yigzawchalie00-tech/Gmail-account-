@@ -509,9 +509,8 @@ def start_ping_server():
     server = HTTPServer(("0.0.0.0", port), PingHandler)
     print(f"[keep-alive] Ping server on port {port}")
     server.serve_forever()
-
-
-async def main():
+    
+    async def main():
     global db_pool
     threading.Thread(target=start_ping_server, daemon=True).start()
 
@@ -538,7 +537,7 @@ async def main():
         fallbacks=[CommandHandler("start", start)],
     )
 
-        app.add_handler(reg_handler)
+    app.add_handler(reg_handler)
     app.add_handler(withdraw_handler)
     app.add_handler(MessageHandler(filters.Regex("^📋 Get Task$"), get_task))
     app.add_handler(MessageHandler(filters.Regex("^✅ Done$"), done))
@@ -558,3 +557,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+

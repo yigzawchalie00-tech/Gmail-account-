@@ -538,11 +538,23 @@ async def main():
         fallbacks=[CommandHandler("start", start)],
     )
 
-    app.add_handler(reg_handler)
+        app.add_handler(reg_handler)
     app.add_handler(withdraw_handler)
     app.add_handler(MessageHandler(filters.Regex("^📋 Get Task$"), get_task))
     app.add_handler(MessageHandler(filters.Regex("^✅ Done$"), done))
     app.add_handler(MessageHandler(filters.Regex("^💰 My Balance$"), balance))
     app.add_handler(MessageHandler(filters.Regex("^📊 My Stats$"), my_stats))
     app.add_handler(MessageHandler(filters.Regex("^👥 All Workers$"), all_workers))
-    app.add_handler(MessageHan
+    app.add_handler(MessageHandler(filters.Regex("^📦 All Tasks$"), all_tasks))
+    app.add_handler(MessageHandler(filters.Regex(r"^/confirm_\d+$"), confirm_task))
+    app.add_handler(MessageHandler(filters.Regex(r"^/reject_\d+$"), reject_task))
+    app.add_handler(MessageHandler(filters.Regex(r"^/paid_\d+$"), paid))
+
+    asyncio.create_task(expire_tasks(db_pool))
+
+    logger.info("Bot started.")
+    await app.run_polling()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -275,14 +275,6 @@ async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     lines = text.split("\n")
 
-    # Expected format (sent by admin manually):
-    # /addtask
-    # First name: Rosa
-    # Last name: X
-    # Email: example@gmail.com
-    # Password: abc123
-    # Year of birth: 2000
-
     data = {}
     for line in lines[1:]:
         if ":" in line:
@@ -292,7 +284,7 @@ async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = data.get("email")
     if not email or "@gmail.com" not in email:
         await update.message.reply_text(
-            "❌ Could not parse task. Make sure format is:\n\n"
+            "❌ Could not parse task. Format:\n\n"
             "/addtask\nFirst name: Rosa\nLast name: X\n"
             "Email: example@gmail.com\nPassword: abc123\nYear of birth: 2000"
         )
@@ -368,7 +360,7 @@ async def reject_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"❌ Task {task_id} rejected. Returned to pool.")
     await context.bot.send_message(
         task['assigned_to'],
-        "❌ Your task was not verified. Please try again more carefully.\nPress 📋 Get Task for a new task."
+        "❌ Your task was not verified. Please try again carefully.\nPress 📋 Get Task for a new task."
     )
 
 

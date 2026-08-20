@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
+const { Telegraf, session } = require('telegraf');
 const { Pool } = require('pg');
 const cron = require('node-cron');
 const http = require('http');
@@ -12,7 +12,8 @@ const BOT_NAME = process.env.BOT_NAME || 'Gmail Farmer';
 const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const bot = new Telegraf(BOT_TOKEN);
 
-// In-memory state for admin
+bot.use(session());
+
 let adminWaitingForTask = false;
 
 async function initDB() {
@@ -98,7 +99,6 @@ function keyboard(userId) {
   return userId === ADMIN_ID ? adminKeyboard() : mainKeyboard();
 }
 
-// --- /start ---
 bot.start(async (ctx) => {
   const userId = ctx.from.id;
   const res = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [userId]);
@@ -107,22 +107,19 @@ bot.start(async (ctx) => {
     return ctx.reply(`Welcome back, ${res.rows[0].name}! 👋\nUse the menu below.`, keyboard(userId));
   }
 
-  ctx.session = ctx.session || {};
   ctx.session.step = 'reg_name';
   return ctx.reply(`👋 Welcome to ${BOT_NAME}!\n\nLet's register you.\n\nWhat is your full name?`);
 });
 
-// --- /addtask ---
 bot.command('addtask', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   adminWaitingForTask = true;
   return ctx.reply(
-    '📋 Send the task details in this format:\n\n' +
+    '📋 Send the task details in the next message:\n\n' +
     'First name: Rosa\nLast name: X\nEmail: example@gmail.com\nPassword: abc123\nYear of birth: 2000'
   );
 });
 
-// --- /confirm ---
 bot.hears(/^\/confirm_(\d+)$/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const taskId = parseInt(ctx.match[1]);
@@ -143,7 +140,6 @@ bot.hears(/^\/confirm_(\d+)$/, async (ctx) => {
   );
 });
 
-// --- /reject ---
 bot.hears(/^\/reject_(\d+)$/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const taskId = parseInt(ctx.match[1]);
@@ -163,7 +159,6 @@ bot.hears(/^\/reject_(\d+)$/, async (ctx) => {
   );
 });
 
-// --- /paid ---
 bot.hears(/^\/paid_(\d+)$/, async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   const workerId = parseInt(ctx.match[1]);
@@ -183,13 +178,12 @@ bot.hears(/^\/paid_(\d+)$/, async (ctx) => {
   );
 });
 
-// --- Main text handler ---
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
   ctx.session = ctx.session || {};
 
-  // --- Admin waiting for task details ---
+  // Admin waiting for task details
   if (userId === ADMIN_ID && adminWaitingForTask) {
     adminWaitingForTask = false;
     const lines = text.split('\n');
@@ -221,7 +215,7 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // --- Registration flow ---
+  // Registration flow
   if (ctx.session.step === 'reg_name') {
     ctx.session.name = text;
     ctx.session.step = 'reg_payment_method';
@@ -256,7 +250,10 @@ bot.on('text', async (ctx) => {
     `, [userId, name, method, number]);
 
     ctx.session = {};
-    await ctx.reply(`✅ Registered!\n\nName: ${name}\nPayment: ${method} — ${number}\n\nYou can now get tasks!`, keyboard(userId));
+    await ctx.reply(
+      `✅ Registered!\n\nName: ${name}\nPayment: ${method} — ${number}\n\nYou can now get tasks!`,
+      keyboard(userId)
+    );
 
     if (userId !== ADMIN_ID) {
       await bot.telegram.sendMessage(ADMIN_ID,
@@ -266,7 +263,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // --- Withdrawal flow ---
+  // Withdrawal flow
   if (ctx.session.step === 'withdraw_amount') {
     const amount = parseInt(text);
     if (isNaN(amount)) return ctx.reply('Please enter a valid number.');
@@ -295,7 +292,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // --- Menu buttons ---
+  // Menu buttons
   if (text === '📋 Get Task') {
     const userRes = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [userId]);
     if (!userRes.rows.length) return ctx.reply('Please register first with /start');
@@ -356,7 +353,9 @@ bot.on('text', async (ctx) => {
   if (text === '💸 Withdraw') {
     const userRes = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [userId]);
     if (!userRes.rows.length) return ctx.reply('Please register first with /start');
-    if (userRes.rows[0].balance < 10) return ctx.reply(`❌ Minimum withdrawal is 10 birr.\nYour balance: ${userRes.rows[0].balance} birr.`);
+    if (userRes.rows[0].balance < 10) {
+      return ctx.reply(`❌ Minimum withdrawal is 10 birr.\nYour balance: ${userRes.rows[0].balance} birr.`);
+    }
     ctx.session.step = 'withdraw_amount';
     return ctx.reply(`Your balance: ${userRes.rows[0].balance} birr.\nHow much do you want to withdraw? (minimum 10 birr)`);
   }
@@ -397,9 +396,6 @@ http.createServer((req, res) => {
   res.writeHead(200);
   res.end('OK - bot running');
 }).listen(PORT, () => console.log(`[keep-alive] Ping server on port ${PORT}`));
-
-initDB().then(() => {
-  bot.use(require('telegraf').session());
 
 initDB().then(() => {
   bot.launch();

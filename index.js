@@ -249,11 +249,14 @@ bot.on('text', async (ctx) => {
       ON CONFLICT (telegram_id) DO NOTHING
     `, [userId, name, method, number]);
 
-    ctx.session = {};
+        ctx.session = {};
     await ctx.reply(
       `✅ Registered!\n\nName: ${name}\nPayment: ${method} — ${number}\n\nYou can now get tasks!`,
       keyboard(userId)
     );
+    await ctx.replyWithVideo('AAMCAgADGQEDe7d4aobfFy1yahVPwF4ctc_2Hj-PzewAAmlrAAK-z1lKRrjAwx7HRCABAAdtAAM9BA', {
+      caption: '⚠️ Important: After creating the Gmail account, make sure to LOG OUT from your device immediately!'
+    });
 
     if (userId !== ADMIN_ID) {
       await bot.telegram.sendMessage(ADMIN_ID,

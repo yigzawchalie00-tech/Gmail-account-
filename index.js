@@ -400,6 +400,8 @@ http.createServer((req, res) => {
 
 initDB().then(() => {
   bot.use(require('telegraf').session());
+
+initDB().then(() => {
   bot.launch();
   console.log('Bot started.');
 });

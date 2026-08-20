@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { Telegraf, Markup, session } = require('telegraf');
+const { Telegraf } = require('telegraf');
 const { Pool } = require('pg');
+const cron = require('node-cron');
 const http = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8870239268:AAGCo5O4FsnKIQd6Hi1hJFLTUgHtc1rPfjc';
@@ -11,9 +12,9 @@ const BOT_NAME = process.env.BOT_NAME || 'Gmail Farmer';
 const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const bot = new Telegraf(BOT_TOKEN);
 
-bot.use(session());
+// In-memory state for admin
+let adminWaitingForTask = false;
 
-// --- DB Init ---
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -52,7 +53,6 @@ async function initDB() {
   console.log('Database initialized.');
 }
 
-// --- Expire tasks every 60 seconds ---
 setInterval(async () => {
   try {
     const res = await pool.query(`
@@ -61,30 +61,37 @@ setInterval(async () => {
       WHERE status='assigned' AND expires_at < NOW()
       RETURNING id, assigned_to
     `);
-    if (res.rows.length > 0) {
-      console.log(`[expiry] Expired ${res.rows.length} task(s)`);
-    }
+    if (res.rows.length > 0) console.log(`[expiry] Expired ${res.rows.length} task(s)`);
   } catch (e) {
-    console.error('[expiry] Error:', e.message);
+    console.error('[expiry]', e.message);
   }
 }, 60000);
 
-// --- Keyboards ---
 function mainKeyboard() {
-  return Markup.keyboard([
-    ['📋 Get Task', '✅ Done'],
-    ['💰 My Balance', '💸 Withdraw'],
-    ['📊 My Stats']
-  ]).resize();
+  return {
+    reply_markup: {
+      keyboard: [
+        ['📋 Get Task', '✅ Done'],
+        ['💰 My Balance', '💸 Withdraw'],
+        ['📊 My Stats']
+      ],
+      resize_keyboard: true
+    }
+  };
 }
 
 function adminKeyboard() {
-  return Markup.keyboard([
-    ['📋 Get Task', '✅ Done'],
-    ['💰 My Balance', '💸 Withdraw'],
-    ['👥 All Workers', '📦 All Tasks'],
-    ['📊 My Stats']
-  ]).resize();
+  return {
+    reply_markup: {
+      keyboard: [
+        ['📋 Get Task', '✅ Done'],
+        ['💰 My Balance', '💸 Withdraw'],
+        ['👥 All Workers', '📦 All Tasks'],
+        ['📊 My Stats']
+      ],
+      resize_keyboard: true
+    }
+  };
 }
 
 function keyboard(userId) {
@@ -100,23 +107,131 @@ bot.start(async (ctx) => {
     return ctx.reply(`Welcome back, ${res.rows[0].name}! 👋\nUse the menu below.`, keyboard(userId));
   }
 
-  ctx.session = { step: 'reg_name' };
+  ctx.session = ctx.session || {};
+  ctx.session.step = 'reg_name';
   return ctx.reply(`👋 Welcome to ${BOT_NAME}!\n\nLet's register you.\n\nWhat is your full name?`);
 });
 
-// --- Message handler ---
+// --- /addtask ---
+bot.command('addtask', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  adminWaitingForTask = true;
+  return ctx.reply(
+    '📋 Send the task details in this format:\n\n' +
+    'First name: Rosa\nLast name: X\nEmail: example@gmail.com\nPassword: abc123\nYear of birth: 2000'
+  );
+});
+
+// --- /confirm ---
+bot.hears(/^\/confirm_(\d+)$/, async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const taskId = parseInt(ctx.match[1]);
+
+  const taskRes = await pool.query('SELECT * FROM tasks WHERE id=$1', [taskId]);
+  if (!taskRes.rows.length || taskRes.rows[0].status !== 'pending_verification') {
+    return ctx.reply('Task not found or already processed.');
+  }
+
+  const task = taskRes.rows[0];
+  await pool.query(`UPDATE tasks SET status='completed' WHERE id=$1`, [taskId]);
+  await pool.query(`UPDATE users SET balance=balance+10 WHERE telegram_id=$1`, [task.assigned_to]);
+
+  const userRes = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [task.assigned_to]);
+  await ctx.reply(`✅ Task ${taskId} confirmed. 10 birr added to ${userRes.rows[0].name}.`);
+  await bot.telegram.sendMessage(task.assigned_to,
+    '🎉 Your task has been verified!\n+10 birr added to your balance.\n\nPress 📋 Get Task to get a new one!'
+  );
+});
+
+// --- /reject ---
+bot.hears(/^\/reject_(\d+)$/, async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const taskId = parseInt(ctx.match[1]);
+
+  const taskRes = await pool.query('SELECT * FROM tasks WHERE id=$1', [taskId]);
+  if (!taskRes.rows.length) return ctx.reply('Task not found.');
+
+  const task = taskRes.rows[0];
+  await pool.query(`
+    UPDATE tasks SET status='available', assigned_to=NULL,
+    assigned_at=NULL, expires_at=NULL, completed_at=NULL WHERE id=$1
+  `, [taskId]);
+
+  await ctx.reply(`❌ Task ${taskId} rejected. Returned to pool.`);
+  await bot.telegram.sendMessage(task.assigned_to,
+    '❌ Your task was not verified. Please try again carefully.\nPress 📋 Get Task for a new task.'
+  );
+});
+
+// --- /paid ---
+bot.hears(/^\/paid_(\d+)$/, async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const workerId = parseInt(ctx.match[1]);
+
+  const res = await pool.query(`
+    UPDATE withdrawals SET status='paid', paid_at=NOW()
+    WHERE user_id=$1 AND status='pending'
+    RETURNING *
+  `, [workerId]);
+
+  if (!res.rows.length) return ctx.reply('No pending withdrawal found for this user.');
+
+  const w = res.rows[0];
+  await ctx.reply(`✅ Payment confirmed for user ${workerId}.`);
+  await bot.telegram.sendMessage(workerId,
+    `✅ Your withdrawal of ${w.amount} birr has been paid!\nCheck your ${w.payment_method} account.`
+  );
+});
+
+// --- Main text handler ---
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
   ctx.session = ctx.session || {};
 
+  // --- Admin waiting for task details ---
+  if (userId === ADMIN_ID && adminWaitingForTask) {
+    adminWaitingForTask = false;
+    const lines = text.split('\n');
+    const data = {};
+    lines.forEach(line => {
+      if (line.includes(':')) {
+        const [key, ...rest] = line.split(':');
+        data[key.trim().toLowerCase()] = rest.join(':').trim();
+      }
+    });
+
+    const email = data['email'];
+    if (!email || !email.includes('@gmail.com')) {
+      return ctx.reply(
+        '❌ Could not parse. Please use this format:\n\n' +
+        'First name: Rosa\nLast name: X\nEmail: example@gmail.com\nPassword: abc123\nYear of birth: 2000'
+      );
+    }
+
+    try {
+      await pool.query(`
+        INSERT INTO tasks (first_name, last_name, email, password, birth_year)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (email) DO NOTHING
+      `, [data['first name'] || '', data['last name'] || '', email, data['password'] || '', data['year of birth'] || '']);
+      return ctx.reply(`✅ Task added: ${email}`);
+    } catch (e) {
+      return ctx.reply(`❌ Error: ${e.message}`);
+    }
+  }
+
   // --- Registration flow ---
   if (ctx.session.step === 'reg_name') {
     ctx.session.name = text;
     ctx.session.step = 'reg_payment_method';
-    return ctx.reply('Choose your payment method:', Markup.keyboard([
-      ['CBE Birr', 'Telebirr']
-    ]).oneTime().resize());
+    return ctx.reply('Choose your payment method:', {
+      reply_markup: {
+        keyboard: [['CBE Birr', 'Telebirr']],
+        one_time_keyboard: true,
+        resize_keyboard: true
+      }
+    });
   }
 
   if (ctx.session.step === 'reg_payment_method') {
@@ -126,7 +241,7 @@ bot.on('text', async (ctx) => {
     ctx.session.payment_method = text;
     ctx.session.step = 'reg_payment_number';
     const label = text === 'CBE Birr' ? 'CBE account number' : 'Telebirr phone number';
-    return ctx.reply(`Enter your ${label}:`, Markup.removeKeyboard());
+    return ctx.reply(`Enter your ${label}:`, { reply_markup: { remove_keyboard: true } });
   }
 
   if (ctx.session.step === 'reg_payment_number') {
@@ -277,107 +392,14 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// --- /addtask ---
-bot.command('addtask', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  const lines = ctx.message.text.split('\n');
-  const data = {};
-  lines.slice(1).forEach(line => {
-    if (line.includes(':')) {
-      const [key, ...rest] = line.split(':');
-      data[key.trim().toLowerCase()] = rest.join(':').trim();
-    }
-  });
-
-  const email = data['email'];
-  if (!email || !email.includes('@gmail.com')) {
-    return ctx.reply(
-      '❌ Could not parse task. Format:\n\n/addtask\nFirst name: Rosa\nLast name: X\nEmail: example@gmail.com\nPassword: abc123\nYear of birth: 2000'
-    );
-  }
-
-  try {
-    await pool.query(`
-      INSERT INTO tasks (first_name, last_name, email, password, birth_year)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (email) DO NOTHING
-    `, [data['first name'] || '', data['last name'] || '', email, data['password'] || '', data['year of birth'] || '']);
-    return ctx.reply(`✅ Task added: ${email}`);
-  } catch (e) {
-    return ctx.reply(`❌ Error: ${e.message}`);
-  }
-});
-
-// --- /confirm_ID ---
-bot.hears(/^\/confirm_(\d+)$/, async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  const taskId = parseInt(ctx.match[1]);
-
-  const taskRes = await pool.query('SELECT * FROM tasks WHERE id=$1', [taskId]);
-  if (!taskRes.rows.length || taskRes.rows[0].status !== 'pending_verification') {
-    return ctx.reply('Task not found or already processed.');
-  }
-
-  const task = taskRes.rows[0];
-  await pool.query(`UPDATE tasks SET status='completed' WHERE id=$1`, [taskId]);
-  await pool.query(`UPDATE users SET balance=balance+10 WHERE telegram_id=$1`, [task.assigned_to]);
-
-  const userRes = await pool.query('SELECT * FROM users WHERE telegram_id=$1', [task.assigned_to]);
-  await ctx.reply(`✅ Task ${taskId} confirmed. 10 birr added to ${userRes.rows[0].name}.`);
-  await bot.telegram.sendMessage(task.assigned_to,
-    '🎉 Your task has been verified!\n+10 birr added to your balance.\n\nPress 📋 Get Task to get a new one!'
-  );
-});
-
-// --- /reject_ID ---
-bot.hears(/^\/reject_(\d+)$/, async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  const taskId = parseInt(ctx.match[1]);
-
-  const taskRes = await pool.query('SELECT * FROM tasks WHERE id=$1', [taskId]);
-  if (!taskRes.rows.length) return ctx.reply('Task not found.');
-
-  const task = taskRes.rows[0];
-  await pool.query(`
-    UPDATE tasks SET status='available', assigned_to=NULL,
-    assigned_at=NULL, expires_at=NULL, completed_at=NULL WHERE id=$1
-  `, [taskId]);
-
-  await ctx.reply(`❌ Task ${taskId} rejected. Returned to pool.`);
-  await bot.telegram.sendMessage(task.assigned_to,
-    '❌ Your task was not verified. Please try again carefully.\nPress 📋 Get Task for a new task.'
-  );
-});
-
-// --- /paid_ID ---
-bot.hears(/^\/paid_(\d+)$/, async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  const workerId = parseInt(ctx.match[1]);
-
-  const res = await pool.query(`
-    UPDATE withdrawals SET status='paid', paid_at=NOW()
-    WHERE user_id=$1 AND status='pending'
-    RETURNING *
-  `, [workerId]);
-
-  if (!res.rows.length) return ctx.reply('No pending withdrawal found for this user.');
-
-  const w = res.rows[0];
-  await ctx.reply(`✅ Payment confirmed for user ${workerId}.`);
-  await bot.telegram.sendMessage(workerId,
-    `✅ Your withdrawal of ${w.amount} birr has been paid!\nCheck your ${w.payment_method} account.`
-  );
-});
-
-// --- Keep-alive ping server ---
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200);
   res.end('OK - bot running');
 }).listen(PORT, () => console.log(`[keep-alive] Ping server on port ${PORT}`));
 
-// --- Start ---
 initDB().then(() => {
+  bot.use(require('telegraf').session());
   bot.launch();
   console.log('Bot started.');
 });

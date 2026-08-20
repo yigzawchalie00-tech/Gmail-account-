@@ -107,7 +107,7 @@ bot.start(async (ctx) => {
     return ctx.reply(`Welcome back, ${res.rows[0].name}! 👋\nUse the menu below.`, keyboard(userId));
   }
 
-  ctx.session.step = 'reg_name';
+  ctx.session = { step: 'reg_name' };
   return ctx.reply(`👋 Welcome to ${BOT_NAME}!\n\nLet's register you.\n\nWhat is your full name?`);
 });
 
